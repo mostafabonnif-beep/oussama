@@ -3,8 +3,11 @@ const router = express.Router();
 const User = require('../models/User');
 const Channel = require('../models/Channel');
 const XtreamSource = require('../models/XtreamSource');
+const Movie = require('../models/Movie');
+const Episode = require('../models/Episode');
 const EpgProgram = require('../models/EpgProgram');
 const PairingRequest = require('../models/PairingRequest');
+const { isValidObjectId } = require('./catalog-helpers');
 const { epgService } = require('../services/epg-service');
 const { audit } = require('../services/audit-log');
 const { issuePlaybackToken, verifyPlaybackToken } = require('../services/playback-token');
@@ -291,14 +294,28 @@ router.get('/playlist/:code/json', async (req, res) => {
 router.post('/playback-token', requireTvOrSessionAuth, async (req, res) => {
   try {
     const channelRef = String(req.body?.channelId || '').trim();
+    const movieId = String(req.body?.movieId || '').trim();
+    const episodeId = String(req.body?.episodeId || '').trim();
     const slot = Number(req.body?.slot ?? 0);
     const catchupStartMs = Number(req.body?.catchupStartMs ?? 0);
     const catchupDurationMin = Math.min(Math.max(Number(req.body?.catchupDurationMin ?? 0), 1), 24 * 60);
     if (!Number.isFinite(catchupStartMs) || catchupStartMs < 0 || !Number.isFinite(catchupDurationMin)) {
       return res.status(400).json({ success: false, error: 'Invalid catch-up parameters' });
     }
-    if (!channelRef || channelRef.length > 200 || !Number.isInteger(slot) || slot < 0 || slot > 3) {
+
+    const hasChannelRef = Boolean(channelRef);
+    const hasVodRef = Boolean(movieId || episodeId);
+    if ((hasChannelRef && hasVodRef) || (!hasChannelRef && !hasVodRef)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Provide exactly one of channelId, movieId or episodeId',
+      });
+    }
+    if (!Number.isInteger(slot) || slot < 0 || slot > 3) {
       return res.status(400).json({ success: false, error: 'channelId and a valid slot are required' });
+    }
+    if (hasChannelRef && channelRef.length > 200) {
+      return res.status(400).json({ success: false, error: 'channelId is too long' });
     }
 
     const user = req.user;
@@ -308,6 +325,54 @@ router.post('/playback-token', requireTvOrSessionAuth, async (req, res) => {
         success: false,
         error: 'Your subscription has expired. Activate a new code to continue watching.',
         code: 'SUBSCRIPTION_EXPIRED',
+      });
+    }
+
+    // ── VOD (movie or series episode) — same encrypted-token + proxy pipeline ──
+    if (hasVodRef) {
+      let vodDoc = null;
+      let vodKind = 'movie';
+      if (movieId) {
+        if (!isValidObjectId(movieId)) {
+          return res.status(400).json({ success: false, error: 'Invalid movie id' });
+        }
+        vodDoc = await Movie.findOne({ _id: movieId, isActive: true }).lean();
+        vodKind = 'movie';
+      } else {
+        if (!isValidObjectId(episodeId)) {
+          return res.status(400).json({ success: false, error: 'Invalid episode id' });
+        }
+        vodDoc = await Episode.findOne({ _id: episodeId, isActive: { $ne: false } }).lean();
+        vodKind = 'episode';
+      }
+      if (!vodDoc) {
+        return res.status(404).json({ success: false, error: 'Content not found' });
+      }
+      if (!vodDoc.streamUrl) {
+        return res.status(404).json({ success: false, error: 'Content has no playable stream' });
+      }
+
+      const { token, expiresAt } = issuePlaybackToken({
+        userId: String(user.id),
+        channelListCode: String(user.channelListCode || ''),
+        streamUrl: vodDoc.streamUrl,
+        upstreamHeaders: {},
+      });
+      const session = await registerStreamSession({
+        userId: String(user.id),
+        sessionId: token,
+        ttlSec: Math.max(0, (expiresAt - Date.now()) / 1000),
+      });
+      return res.json({
+        success: true,
+        data: {
+          playbackUrl: `${getPublicBaseUrl(req)}/api/v1/tv/playback/${token}`,
+          mimeType: inferPlaybackMimeType(vodDoc.streamUrl),
+          expiresAt,
+          slot: 0,
+          type: vodKind,
+          streamLimit: { max: session.max, active: session.active },
+        },
       });
     }
 
