@@ -18,6 +18,8 @@ interface StreamChannel {
   logo?: string;
   channelId?: string;
   alternateUrls?: string[];
+  /** true = url is a ready-to-play token URL (VOD); skip stream-proxy wrapping */
+  direct?: boolean;
 }
 
 interface StreamPlayerState {
