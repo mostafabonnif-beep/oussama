@@ -358,7 +358,7 @@ export class EpgService {
     }
 
     if (!response) throw new Error('EPG URL fetch failed');
-    let isGzip = currentUrl.endsWith('.gz') || url.endsWith('.gz');
+    const isGzip = currentUrl.endsWith('.gz') || url.endsWith('.gz');
 
     const xmlData = await new Promise<string>((resolve, reject) => {
       const chunks: Buffer[] = [];
