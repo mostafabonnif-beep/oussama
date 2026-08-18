@@ -52,7 +52,9 @@ async function main() {
 
   // Import AFTER env is set — server.js reads env at require time.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  require('../src/server');
+  const { startServer } = require('../src/server');
+  // The server module only auto-starts as the main module; start it explicitly here.
+  startServer();
 
   // Wait for the API to come up.
   let ready = false;
