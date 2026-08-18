@@ -405,6 +405,45 @@ async function syncSeriesEpisodes(sourceId: mongoose.Types.ObjectId, seriesDoc: 
   }
 }
 
+/**
+ * Lazy series content loading: fetch seasons + episodes for one series from the
+ * panel on demand (when a user opens a series/season in the dashboard), then
+ * persist them. Best-effort — callers should catch and degrade gracefully.
+ */
+
+async function seriesSourceAndCreds(series: any): Promise<XtreamCredentials> {
+  const source = await XtreamSource.findOne({
+    _id: series.sourceId,
+    verificationStatus: { $ne: 'blocked' },
+  }).lean().exec();
+  if (!source) throw new Error('Xtream source unavailable for this series');
+  return {
+    serverUrl: source.serverUrl,
+    username: decryptSecret(source.usernameEncrypted),
+    password: decryptSecret(source.passwordEncrypted),
+  };
+}
+
+/** Fetch seasons (and episodes) for a series from its Xtream panel on demand. */
+export async function ensureSeriesSeasons(seriesId: string) {
+  const series = await Series.findOne({ _id: seriesId, isActive: true }).lean().exec();
+  if (!series) throw new Error('Series not found');
+  const creds = await seriesSourceAndCreds(series);
+  await syncSeriesEpisodes(series.sourceId, series, creds);
+  return Season.find({ seriesId: series._id }).sort({ seasonNumber: 1 }).lean().exec();
+}
+
+/** Fetch seasons + episodes for a season's series on demand; returns stored episode count. */
+export async function ensureSeasonEpisodes(seasonId: string): Promise<number> {
+  const season = await Season.findById(seasonId).lean().exec();
+  if (!season) throw new Error('Season not found');
+  const series = await Series.findOne({ _id: season.seriesId, isActive: true }).lean().exec();
+  if (!series) throw new Error('Series not found');
+  const creds = await seriesSourceAndCreds(series);
+  await syncSeriesEpisodes(series.sourceId, series, creds);
+  return Episode.countDocuments({ seasonId: season._id }).exec();
+}
+
 function liveChannelSnapshot(sourceId: mongoose.Types.ObjectId, item: any, group: string, creds: XtreamCredentials, playbackFormat: XtreamPlaybackFormat = 'm3u8') {
   return {
     channelId: `xt:${String(sourceId)}:${item.stream_id}`,
@@ -464,7 +503,7 @@ async function mapCategories(items: any[]) {
  * Full sync of one Xtream source:
  * live streams → Channel catalog, VOD → Movies, series → Series/Seasons/Episodes.
  */
-export async function syncXtreamSource(sourceId: string, opts: { allowCatalogOnly?: boolean } = {}) {
+export async function syncXtreamSource(sourceId: string, opts: { allowCatalogOnly?: boolean; syncEpisodes?: boolean } = {}) {
   const source = await XtreamSource.findById(sourceId).exec();
   if (!source) throw new Error('Xtream source not found');
   const catalogOnly = opts.allowCatalogOnly === true;
@@ -541,21 +580,26 @@ export async function syncXtreamSource(sourceId: string, opts: { allowCatalogOnl
       seriesCount += 1;
     }
 
-    // Episodes — bounded concurrency to avoid hammering the source panel.
-    const seriesDocs = await Series.find({
-      sourceId: id,
-      isActive: true,
-      externalId: { $in: [...seriesExternalIds] },
-    }).lean().exec();
-    const CONCURRENCY = 3;
-    let idx = 0;
-    const worker = async () => {
-      while (idx < seriesDocs.length) {
-        const doc = seriesDocs[idx++];
-        await syncSeriesEpisodes(id, doc, creds);
-      }
-    };
-    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+    // Episodes are now LAZY: they are fetched on demand when a season is opened
+    // (see ensureSeasonEpisodes). A full backfill can still be triggered with
+    // opts.syncEpisodes=true — used for targeted imports, never for catalog-only
+    // imports of large panels (16k+ series would take hours).
+    if (opts.syncEpisodes === true) {
+      const seriesDocs = await Series.find({
+        sourceId: id,
+        isActive: true,
+        externalId: { $in: [...seriesExternalIds] },
+      }).lean().exec();
+      const CONCURRENCY = 3;
+      let idx = 0;
+      const worker = async () => {
+        while (idx < seriesDocs.length) {
+          const doc = seriesDocs[idx++];
+          await syncSeriesEpisodes(id, doc, creds);
+        }
+      };
+      await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+    }
 
     // Prune: deactivate channels/movies/series from this source that disappeared.
     await Channel.updateMany(
@@ -602,6 +646,8 @@ module.exports = {
   verifyXtreamSource,
   syncXtreamSource,
   previewXtreamSource,
+  ensureSeriesSeasons,
+  ensureSeasonEpisodes,
   encryptSecret,
   decryptSecret,
 };

@@ -13,6 +13,8 @@ interface StreamPlayerChannel {
   alternateUrls?: string[];
   /** true = url is already a ready-to-play token URL; skip the stream-proxy wrapper, alternates and play reports */
   direct?: boolean;
+  /** Number of alternates available (for on-demand slot tokens when direct=true) */
+  maxSlot?: number;
 }
 
 interface StreamPlayerProps {
@@ -36,6 +38,7 @@ export default function StreamPlayer({ channel, onClose, mode = 'proxy' }: Strea
   const wasActiveRef = useRef(false); // tracks if player was already open (for swap vs fresh open)
   const playReportedRef = useRef<{ channelId: string; at: number } | null>(null);
   const currentSourceRef = useRef<'direct' | 'proxy'>('proxy');
+  const nextSlotRef = useRef(0); // next alternate slot to try in token (direct) mode
 
   // Drag position for mini player
   const [position, setPosition] = useState({ right: 16, bottom: 16 });
@@ -147,6 +150,7 @@ export default function StreamPlayer({ channel, onClose, mode = 'proxy' }: Strea
     }
     const url = channel.url;
     const directMode = channel.direct === true;
+    const ch = channel;
     const directUrl = url;
     const proxyUrl = directMode ? url : `/api/v1/stream-proxy?url=${encodeURIComponent(url)}`;
     const alternateUrls = directMode ? [] : (channel.alternateUrls || []);
@@ -154,8 +158,10 @@ export default function StreamPlayer({ channel, onClose, mode = 'proxy' }: Strea
     const sessionId = typeof window !== 'undefined' ? useAuthStore.getState().sessionId : null;
     let destroyed = false;
     let activeHls: { destroy: () => void } | null = null;
-    let currentSource: 'direct' | 'proxy' = directMode ? 'direct' : mode === 'proxy' ? 'proxy' : 'direct';
+    // Token (direct) mode plays through the platform proxy, so badge it as proxy.
+    let currentSource: 'direct' | 'proxy' = directMode || mode === 'proxy' ? 'proxy' : 'direct';
     currentSourceRef.current = currentSource;
+    nextSlotRef.current = 0;
     // Native-HLS (Safari) listeners — hoisted so cleanup can remove them.
     let nativeLoadedMeta: (() => void) | null = null;
     let nativeError: (() => void) | null = null;
@@ -257,6 +263,19 @@ export default function StreamPlayer({ channel, onClose, mode = 'proxy' }: Strea
                   } else if (data.type === 'networkError' && mode === 'proxy') {
                     setStatus('Network error — retrying...');
                     hls.startLoad();
+                  } else if (directMode && ch.channelId && nextSlotRef.current < (ch.maxSlot || 0)) {
+                    // Token mode: fetch the next alternate slot's token on demand.
+                    const slot = nextSlotRef.current + 1;
+                    nextSlotRef.current = slot;
+                    setStatus(`Trying alternate ${slot}...`);
+                    api
+                      .post('/tv/playback-token', { channelId: ch.channelId, slot })
+                      .then((res) => {
+                        if (destroyed) return;
+                        safeDestroyHls(activeHls);
+                        tryHlsSource(res.data.data.playbackUrl, true);
+                      })
+                      .catch(() => setPlayerError('All sources failed'));
                   } else if (alternateIndex < alternateUrls.length) {
                     const altUrl = alternateUrls[alternateIndex++];
                     const altProxy = `/api/v1/stream-proxy?url=${encodeURIComponent(altUrl)}`;
@@ -288,7 +307,19 @@ export default function StreamPlayer({ channel, onClose, mode = 'proxy' }: Strea
           };
           nativeError = () => {
             if (destroyed) return;
-            if (!nativeFallback && mode === 'direct-fallback') {
+            if (directMode && ch.channelId && nextSlotRef.current < (ch.maxSlot || 0)) {
+              const slot = nextSlotRef.current + 1;
+              nextSlotRef.current = slot;
+              setStatus(`Trying alternate ${slot}...`);
+              api
+                .post('/tv/playback-token', { channelId: ch.channelId, slot })
+                .then((res) => {
+                  if (destroyed) return;
+                  video!.src = res.data.data.playbackUrl;
+                  video!.load();
+                })
+                .catch(() => setPlayerError('All sources failed'));
+            } else if (!nativeFallback && mode === 'direct-fallback') {
               nativeFallback = true;
               currentSource = 'proxy';
               currentSourceRef.current = currentSource;
