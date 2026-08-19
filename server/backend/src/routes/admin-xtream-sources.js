@@ -38,6 +38,7 @@ function publicShape(src) {
     lastSyncAt: src.lastSyncAt,
     catalogOnlyImportedAt: src.catalogOnlyImportedAt || null,
     customerVisible: src.customerVisible === true,
+    directPlayback: src.directPlayback === true,
     lastError: src.lastError,
     lastDiagnosticsAt: src.lastDiagnosticsAt,
     verifiedAt: src.verifiedAt,
@@ -320,7 +321,7 @@ router.patch('/:id', async (req, res) => {
     const source = await XtreamSource.findById(id).exec();
     if (!source) return res.status(404).json({ success: false, error: 'Source not found' });
 
-    const { name, status, username, password, customerVisible } = req.body || {};
+    const { name, status, username, password, customerVisible, directPlayback } = req.body || {};
     if (name !== undefined) source.name = String(name).trim();
     if (customerVisible !== undefined) {
       source.customerVisible = customerVisible === true;
@@ -331,6 +332,16 @@ router.patch('/:id', async (req, res) => {
         resource: 'XtreamSource',
         resourceId: String(id),
         changes: { after: { customerVisible: source.customerVisible } },
+      });
+    }
+    if (directPlayback !== undefined) {
+      source.directPlayback = directPlayback === true;
+      audit({
+        ...reqCtx(req),
+        action: 'XTREAM_SOURCE_DIRECT_PLAYBACK',
+        resource: 'XtreamSource',
+        resourceId: String(id),
+        changes: { after: { directPlayback: source.directPlayback } },
       });
     }
     const credentialsChanged = username !== undefined || password !== undefined;
