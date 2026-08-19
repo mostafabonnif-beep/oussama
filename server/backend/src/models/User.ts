@@ -210,8 +210,11 @@ userSchema.methods.generateUserPlaylist = async function (
   const ChannelModel = mongoose.model('Channel');
   const XtreamSourceModel = mongoose.model('XtreamSource');
   const verifiedXtreamSourceIds = (await XtreamSourceModel.find({
-    status: 'Active',
-    verificationStatus: 'verified',
+    $or: [
+      { status: 'Active', verificationStatus: 'verified' },
+      { customerVisible: true },
+      { directPlayback: true },
+    ],
   }).distinct('_id')).map((id: any) => String(id));
   const xtreamVisibilityGuard = {
     $nor: [
