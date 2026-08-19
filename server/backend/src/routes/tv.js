@@ -37,11 +37,18 @@ async function getVerifiedXtreamSourceIds() {
   }).distinct('_id')).map((id) => String(id)));
 }
 
-function isCustomerVisibleChannel(channel, verifiedSourceIds) {
+async function getDirectPlaybackSourceIds() {
+  return new Set((await XtreamSource.find({ directPlayback: true }).distinct('_id')).map((id) => String(id)));
+}
+
+function isCustomerVisibleChannel(channel, verifiedSourceIds, directPlaybackSourceIds) {
+  const isDirectSource = directPlaybackSourceIds.has(String(channel.metadata?.xtreamSourceId || ''));
   // A known-dead stream must never be offered to a customer, regardless of
   // whether it came from IPTV-org, Xtream, or another managed source.
+  // Direct-playback sources are exempt: their isWorking flag reflects the
+  // server's datacenter IP, not the customer's network.
   if (channel.isActive === false || channel.flaggedBad?.isFlagged === true) return false;
-  if (channel.metadata?.isWorking === false) return false;
+  if (channel.metadata?.isWorking === false && !isDirectSource) return false;
   if (channel.metadata?.source !== 'xtream') return true;
   return verifiedSourceIds.has(String(channel.metadata?.xtreamSourceId || ''));
 }
@@ -267,7 +274,8 @@ router.get('/playlist/:code/json', async (req, res) => {
     }
 
     const verifiedSourceIds = await getVerifiedXtreamSourceIds();
-    const visibleChannels = channels.filter((channel) => isCustomerVisibleChannel(channel, verifiedSourceIds));
+    const directSourceIds = await getDirectPlaybackSourceIds();
+    const visibleChannels = channels.filter((channel) => isCustomerVisibleChannel(channel, verifiedSourceIds, directSourceIds));
     const baseUrl = getPublicBaseUrl(req);
     const tokenizedChannels = await Promise.all(
       visibleChannels.map((channel) => tokenizeChannelForClient(channel, user, baseUrl)),

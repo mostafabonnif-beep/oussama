@@ -216,6 +216,9 @@ userSchema.methods.generateUserPlaylist = async function (
       { directPlayback: true },
     ],
   }).distinct('_id')).map((id: any) => String(id));
+  const directPlaybackSourceIds = (await XtreamSourceModel.find({
+    directPlayback: true,
+  }).distinct('_id')).map((id: any) => String(id));
   const xtreamVisibilityGuard = {
     $nor: [
       {
@@ -245,8 +248,11 @@ userSchema.methods.generateUserPlaylist = async function (
   m3uContent += `#PLAYLIST:${this.username}'s Channel List\n\n`;
 
   for (const channel of channels as any[]) {
-    const primaryDead = channel.metadata?.isWorking === false;
-    const primaryFlagged = channel.flaggedBad?.isFlagged === true;
+    const isDirectSource = directPlaybackSourceIds.includes(String(channel.metadata?.xtreamSourceId || ''));
+    // For direct-playback sources, isWorking reflects the server's datacenter IP
+    // (blocked upstream), not the customer's network — keep the primary URL.
+    const primaryDead = channel.metadata?.isWorking === false && !isDirectSource;
+    const primaryFlagged = channel.flaggedBad?.isFlagged === true && !isDirectSource;
     const viableAlternate = (channel.alternateStreams || []).find(
       (alternate: any) => alternate.liveness?.status === 'alive' && alternate.flaggedBad?.isFlagged !== true,
     );
@@ -256,6 +262,7 @@ userSchema.methods.generateUserPlaylist = async function (
       userId: String(this._id),
       channelListCode: this.channelListCode,
       streamUrl: sourceUrl,
+      direct: isDirectSource || undefined,
     });
     const playbackUrl = `${baseUrl || ''}/api/v1/tv/playback/${token}`;
     m3uContent += `${channel.toM3U().replace(channel.channelUrl, playbackUrl)}\n\n`;
