@@ -12,6 +12,7 @@ export interface IXtreamSourceDocument extends Document {
   lastSyncAt?: Date | null;
   catalogOnlyImportedAt?: Date | null;
   customerVisible?: boolean;
+  directPlayback?: boolean;
   lastError?: string | null;
   lastDiagnosticsAt?: Date | null;
   verifiedAt?: Date | null;
@@ -43,6 +44,7 @@ const xtreamSourceSchema = new Schema<IXtreamSourceDocument>(
     lastSyncAt: { type: Date, default: null },
     catalogOnlyImportedAt: { type: Date, default: null },
     customerVisible: { type: Boolean, default: false },
+    directPlayback: { type: Boolean, default: false },
     lastError: { type: String, default: null },
     lastDiagnosticsAt: { type: Date, default: null },
     verifiedAt: { type: Date, default: null },

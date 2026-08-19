@@ -26,20 +26,29 @@ const { checkPlaybackSubscription } = require('../services/playback-access-servi
 async function getVerifiedXtreamSourceIds() {
   // Sources that passed live playback verification (and are Active), OR that the
   // operator explicitly marked customer-visible (catalog-only import decision —
-  // visible even while Inactive, since such sources cannot pass verification).
+  // visible even while Inactive, since such sources cannot pass verification),
+  // OR that opted into direct playback (clients fetch from their own network).
   return new Set((await XtreamSource.find({
     $or: [
       { status: 'Active', verificationStatus: 'verified' },
       { customerVisible: true },
+      { directPlayback: true },
     ],
   }).distinct('_id')).map((id) => String(id)));
 }
 
-function isCustomerVisibleChannel(channel, verifiedSourceIds) {
+async function getDirectPlaybackSourceIds() {
+  return new Set((await XtreamSource.find({ directPlayback: true }).distinct('_id')).map((id) => String(id)));
+}
+
+function isCustomerVisibleChannel(channel, verifiedSourceIds, directPlaybackSourceIds) {
+  const isDirectSource = directPlaybackSourceIds.has(String(channel.metadata?.xtreamSourceId || ''));
   // A known-dead stream must never be offered to a customer, regardless of
   // whether it came from IPTV-org, Xtream, or another managed source.
+  // Direct-playback sources are exempt: their isWorking flag reflects the
+  // server's datacenter IP, not the customer's network.
   if (channel.isActive === false || channel.flaggedBad?.isFlagged === true) return false;
-  if (channel.metadata?.isWorking === false) return false;
+  if (channel.metadata?.isWorking === false && !isDirectSource) return false;
   if (channel.metadata?.source !== 'xtream') return true;
   return verifiedSourceIds.has(String(channel.metadata?.xtreamSourceId || ''));
 }
@@ -265,7 +274,8 @@ router.get('/playlist/:code/json', async (req, res) => {
     }
 
     const verifiedSourceIds = await getVerifiedXtreamSourceIds();
-    const visibleChannels = channels.filter((channel) => isCustomerVisibleChannel(channel, verifiedSourceIds));
+    const directSourceIds = await getDirectPlaybackSourceIds();
+    const visibleChannels = channels.filter((channel) => isCustomerVisibleChannel(channel, verifiedSourceIds, directSourceIds));
     const baseUrl = getPublicBaseUrl(req);
     const tokenizedChannels = await Promise.all(
       visibleChannels.map((channel) => tokenizeChannelForClient(channel, user, baseUrl)),
@@ -379,13 +389,17 @@ router.post('/playback-token', requireTvOrSessionAuth, async (req, res) => {
     const channel = await Channel.findOne({ channelId: channelRef, isActive: { $ne: false } }).lean();
     if (!channel) return res.status(404).json({ success: false, error: 'Channel not found' });
 
+    let xtreamDirectPlayback = false;
     if (channel.metadata?.source === 'xtream') {
       const source = await XtreamSource.findOne({
         _id: channel.metadata.xtreamSourceId,
-        status: 'Active',
-        verificationStatus: 'verified',
+        $or: [
+          { status: 'Active', verificationStatus: 'verified' },
+          { directPlayback: true },
+        ],
       }).lean();
       if (!source) return res.status(404).json({ success: false, error: 'Channel source is not verified', code: 'SOURCE_NOT_VERIFIED' });
+      xtreamDirectPlayback = source.directPlayback === true;
     }
 
     const isCatalogUser = user.role === 'Admin' || user.allCatalog === true;
@@ -451,6 +465,7 @@ router.post('/playback-token', requireTvOrSessionAuth, async (req, res) => {
       userId: String(user.id),
       channelListCode: String(user.channelListCode || ''),
       streamUrl,
+      direct: xtreamDirectPlayback || undefined,
       upstreamHeaders: {
         userAgent: slot === 0 ? channel.activeUserAgent : selectedAlternate?.userAgent,
         referrer: slot === 0 ? channel.activeReferrer : selectedAlternate?.referrer,
@@ -529,6 +544,13 @@ router.get('/playback/:token', async (req, res) => {
     }).select('_id channelListCode role');
     if (!user) return res.status(401).send('Playback authorization revoked');
     if (!(await ensurePlaybackSubscription(user, res))) return;
+
+    if (payload.direct === true) {
+      // Operator opted this source into direct playback: the client fetches the
+      // upstream URL from its own network (e.g. residential IP) instead of the
+      // server proxying the bytes. Token is still validated above.
+      return res.redirect(302, payload.streamUrl);
+    }
 
     return proxyUpstreamStream(req, res, payload.streamUrl, {
       userId: String(user._id),
